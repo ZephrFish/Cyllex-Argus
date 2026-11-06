@@ -277,9 +277,10 @@ def update_llm(body: LLMUpdate, request: Request) -> dict:
         anthropic_cfg = _merge_anthropic(body.anthropic, services.config.llm.anthropic)
         openai_cfg = _merge_openai(body.openai, services.config.llm.openai)
         try:
-            stored_search = _stored_llm(services).search
+            stored_llm = _stored_llm(services)
         except ConfigError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        stored_search = stored_llm.search
         llm = LLMConfig(
             provider=body.provider,
             model=(body.model or "").strip() or None,
@@ -291,6 +292,9 @@ def update_llm(body: LLMUpdate, request: Request) -> dict:
             openai=openai_cfg,
             agents=agents_cfg,
             search=_merge_search(body.search, stored_search),
+            # Not exposed in the form, so carry the stored value forward: rebuilding LLMConfig
+            # field by field would otherwise reset it to its default on every save.
+            subscription_cost_basis=stored_llm.subscription_cost_basis,
         )
         try:
             update_llm_config(services.paths.config_file, llm)

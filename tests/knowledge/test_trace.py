@@ -98,3 +98,29 @@ def test_delete_before_and_size(store):
 
 def test_null_recorder_records_nothing():
     NullRecorder().record(_event(1))
+
+
+def test_price_from_table_false_stores_tokens_but_no_cost(store):
+    """`[llm] subscription_cost_basis = "none"` arrives here as price_from_table=False. A
+    flat-rate subscription bills no tokens, so the money column stays empty while tokens,
+    model and duration are still recorded."""
+    inv = store.create_investigation("APT29")
+    recorder = SQLiteTraceRecorder(store._conn, retain_raw=False)
+    usage = LLMUsage(input_tokens=2166, output_tokens=4, model="claude-opus-5-5",
+                     duration_ms=10, price_from_table=False)
+    recorder.record(_event(inv.id, stage="analyst", decision="analyzed", usage=usage))
+    [event] = recorder.list_events(inv.id)
+    assert event.cost_usd is None
+    assert event.usage.input_tokens == 2166 and event.usage.model == "claude-opus-5-5"
+    assert event.duration_ms == 10
+
+
+def test_price_from_table_default_still_prices(store):
+    """The default must not change for any metered provider: a priceable model still gets a cost."""
+    inv = store.create_investigation("APT29")
+    recorder = SQLiteTraceRecorder(store._conn, retain_raw=False)
+    usage = LLMUsage(input_tokens=2166, output_tokens=4, model="claude-opus-5-5", duration_ms=10)
+    recorder.record(_event(inv.id, stage="analyst", decision="analyzed", usage=usage))
+    [event] = recorder.list_events(inv.id)
+    assert event.cost_usd == cost_usd("claude-opus-5-5", 2166, 4)
+    assert event.cost_usd is not None

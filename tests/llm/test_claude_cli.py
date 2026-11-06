@@ -191,3 +191,91 @@ def test_usage_is_read_from_the_cli_output():
 def test_usage_is_none_when_the_cli_does_not_report_it():
     stdout = json.dumps({"subtype": "success", "is_error": False, "structured_output": {"items": []}})
     assert _provider(stdout=stdout).complete_json(REQUEST, Answer).usage is None
+
+
+# --- usage accounting against the real CLI output shape ------------------------------
+# Captured from Claude Code 2.1.318: top-level "model" is null and "usage.input_tokens"
+# counts only the uncached prefix, so the real input sits in the two cache buckets.
+# Reading usage.input_tokens alone understated input ~100x and labelled the row
+# "claude-code-cli", which is in no price table, so the cost column stayed empty.
+_REAL_CLI_USAGE = {
+    "input_tokens": 2,
+    "cache_creation_input_tokens": 1517,
+    "cache_read_input_tokens": 649,
+    "output_tokens": 4,
+    "server_tool_use": {"web_search_requests": 3, "web_fetch_requests": 0},
+}
+_REAL_CLI_MODEL_USAGE = {
+    "claude-opus-5-5": {
+        "inputTokens": 2, "outputTokens": 4,
+        "cacheReadInputTokens": 649, "cacheCreationInputTokens": 1517,
+        "webSearchRequests": 3, "canonicalModel": "claude-opus-5-5",
+    }
+}
+
+
+def _success_with(usage=None, model_usage=None, model=None) -> str:
+    payload = {"items": [{"name": "x"}]}
+    out = {"type": "result", "subtype": "success", "is_error": False, "api_error_status": None,
+           "result": json.dumps(payload), "structured_output": payload, "model": model}
+    if usage is not None:
+        out["usage"] = usage
+    if model_usage is not None:
+        out["modelUsage"] = model_usage
+    return json.dumps(out)
+
+
+def test_usage_counts_cache_tokens_and_uses_the_real_model_id():
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model_usage=_REAL_CLI_MODEL_USAGE, model=None)
+    usage = _provider(stdout=stdout).complete_json(REQUEST, Answer).usage
+    assert usage.input_tokens == 2 + 1517 + 649   # not 2
+    assert usage.output_tokens == 4
+    assert usage.model == "claude-opus-5-5"       # not "claude-code-cli"
+    assert usage.web_search_requests == 3
+
+
+def test_usage_model_id_is_priceable():
+    """The point of reading modelUsage: the id must be one the price table knows, or the
+    dashboard cost column is empty however many tokens were counted."""
+    from cyllex_argus.llm.prices import cost_usd
+
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model_usage=_REAL_CLI_MODEL_USAGE, model=None)
+    usage = _provider(stdout=stdout).complete_json(REQUEST, Answer).usage
+    assert cost_usd(usage.model, usage.input_tokens, usage.output_tokens, usage.web_search_requests) is not None
+
+
+def test_usage_cache_tokens_counted_without_model_usage():
+    """Older output shape: no modelUsage, so the plain `usage` path must correct cache tokens too."""
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model="claude-sonnet-5-5")
+    usage = _provider(stdout=stdout).complete_json(REQUEST, Answer).usage
+    assert usage.input_tokens == 2 + 1517 + 649
+    assert usage.model == "claude-sonnet-5-5"
+    assert usage.web_search_requests == 3
+
+
+def test_usage_sums_a_mid_call_model_fallback():
+    """Claude Code may fall back mid-call; tokens sum and the label is the model that
+    produced the most output."""
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model_usage={
+        "claude-opus-5-5": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 100},
+        "claude-sonnet-5-5": {"inputTokens": 20, "outputTokens": 90, "cacheReadInputTokens": 200},
+    }, model=None)
+    usage = _provider(stdout=stdout).complete_json(REQUEST, Answer).usage
+    assert usage.input_tokens == 10 + 100 + 20 + 200
+    assert usage.output_tokens == 95
+    assert usage.model == "claude-sonnet-5-5"
+
+
+def test_subscription_cost_basis_none_suppresses_pricing_but_keeps_tokens():
+    """A Pro/Max subscription bills no tokens, so an operator may want the money column empty.
+    Tokens, model and duration must survive that choice; only pricing is turned off."""
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model_usage=_REAL_CLI_MODEL_USAGE, model=None)
+    usage = _provider(stdout=stdout, subscription_cost_basis="none").complete_json(REQUEST, Answer).usage
+    assert usage.price_from_table is False
+    assert usage.input_tokens == 2 + 1517 + 649      # correction is unconditional
+    assert usage.model == "claude-opus-5-5"          # so is the real model id
+
+
+def test_subscription_cost_basis_defaults_to_list():
+    stdout = _success_with(usage=_REAL_CLI_USAGE, model_usage=_REAL_CLI_MODEL_USAGE, model=None)
+    assert _provider(stdout=stdout).complete_json(REQUEST, Answer).usage.price_from_table is True

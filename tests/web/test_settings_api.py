@@ -320,3 +320,21 @@ def test_put_persists_and_preserves_search_max_results(client, world):
     client.put("/api/settings/llm", json=_payload(search={"provider": "disabled"}))
     stored = tomllib.loads(world.paths.config_file.read_text(encoding="utf-8"))["llm"]
     assert stored["search"] == {"provider": "disabled", "max_results": 60}
+
+
+def test_put_preserves_subscription_cost_basis(client, world):
+    """`subscription_cost_basis` is not on the Settings form. The handler rebuilds LLMConfig
+    field by field, so without carrying the stored value forward an unrelated save would
+    silently reset an operator's "none" back to the "list" default."""
+    seeded = SEEDED_TOML.replace(
+        'provider = "claude-code-cli"\ntimeout_seconds = 600',
+        'provider = "claude-code-cli"\ntimeout_seconds = 600\nsubscription_cost_basis = "none"',
+        1,
+    )
+    world.paths.config_file.write_text(seeded, encoding="utf-8")
+    assert tomllib.loads(seeded)["llm"]["subscription_cost_basis"] == "none"  # guard the fixture
+
+    assert client.put("/api/settings/llm", json=PAYLOAD).status_code == 200
+
+    stored = tomllib.loads(world.paths.config_file.read_text(encoding="utf-8"))["llm"]
+    assert stored["subscription_cost_basis"] == "none"
