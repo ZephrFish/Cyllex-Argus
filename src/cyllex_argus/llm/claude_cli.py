@@ -134,31 +134,85 @@ class ClaudeCodeCLIProvider:
         return LLMResponse(output=output, usage=self._usage(data, duration_ms))
 
     def _usage(self, data: dict, duration_ms: int) -> LLMUsage | None:
-        """Build the usage record Argus stores. Claude Code's JSON output has shifted around which
-        top-level fields it carries (sometimes `model`, sometimes `modelUsage: {<model>: {...}}`),
-        so we try the known locations and fall back to the configured model so the row is at least
-        ``claude-code-cli/<model>``. If no tokens are reported at all, we return None."""
+        """Build the usage record Argus stores.
+
+        Prefer `modelUsage`, not `usage`. Verified against Claude Code 2.1.318, which reports:
+
+            "model": null,
+            "usage":      {"input_tokens": 2, "cache_creation_input_tokens": 1517,
+                           "cache_read_input_tokens": 649, "output_tokens": 4, ...}
+            "modelUsage": {"claude-opus-5-5": {"inputTokens": 2, "outputTokens": 4,
+                           "cacheReadInputTokens": 649, "cacheCreationInputTokens": 1517,
+                           "webSearchRequests": 0, "canonicalModel": "claude-opus-5-5", ...}}
+
+        Two consequences, both of which this method has to handle:
+
+        1. `usage.input_tokens` counts only the UNCACHED prefix. With prompt caching on (the
+           default) that is a handful of tokens while the real input sits in the two cache
+           buckets, so reading it alone understates input by ~100x. Input is the sum of all
+           three.
+        2. Top-level `model` is null, so the old fallback chain landed on the literal string
+           "claude-code-cli", which is not a model id and is in no price table. Hence the
+           `no price configured` warning and an empty cost column. `modelUsage` is keyed by the
+           real id, which the price table already knows.
+
+        A mid-call model fallback (limits, `fallback_credit`) yields several `modelUsage` keys;
+        tokens are summed across them and the row is labelled with whichever produced the most
+        output, since that is the one that did the work.
+
+        Correcting the tokens and the model id is unconditional: both were simply wrong. Whether
+        the trace then prices the call is the operator's choice, because this provider runs on a
+        flat-rate subscription where a per-token figure is notional. See
+        `[llm] subscription_cost_basis`.
+        """
+        priceable = self._cfg.subscription_cost_basis != "none"
+        model_usage = data.get("modelUsage")
+        if isinstance(model_usage, dict) and model_usage:
+            buckets = [(k, v) for k, v in model_usage.items() if isinstance(v, dict)]
+            if buckets:
+                def _n(bucket: dict, *keys: str) -> int:
+                    for key in keys:
+                        value = bucket.get(key)
+                        if isinstance(value, int):
+                            return value
+                    return 0
+
+                input_tokens = sum(
+                    _n(b, "inputTokens", "input_tokens")
+                    + _n(b, "cacheCreationInputTokens", "cache_creation_input_tokens")
+                    + _n(b, "cacheReadInputTokens", "cache_read_input_tokens")
+                    for _, b in buckets
+                )
+                output_tokens = sum(_n(b, "outputTokens", "output_tokens") for _, b in buckets)
+                searches = sum(_n(b, "webSearchRequests", "web_search_requests") for _, b in buckets)
+                name, top = max(buckets, key=lambda kv: _n(kv[1], "outputTokens", "output_tokens"))
+                model = top.get("canonicalModel") or name
+                if input_tokens or output_tokens:
+                    return LLMUsage(
+                        input_tokens=input_tokens, output_tokens=output_tokens,
+                        model=str(model), duration_ms=duration_ms,
+                        web_search_requests=searches, price_from_table=priceable,
+                    )
+
         raw = data.get("usage") or data.get("message", {}).get("usage")
         if not isinstance(raw, dict):
-            # Some versions put per-model counts under modelUsage: {<model>: {inputTokens, outputTokens, ...}}
-            model_usage = data.get("modelUsage")
-            if isinstance(model_usage, dict) and model_usage:
-                model_name, bucket = next(iter(model_usage.items()))
-                if isinstance(bucket, dict):
-                    input_tokens = bucket.get("inputTokens") or bucket.get("input_tokens")
-                    output_tokens = bucket.get("outputTokens") or bucket.get("output_tokens")
-                    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-                        return LLMUsage(
-                            input_tokens=input_tokens, output_tokens=output_tokens,
-                            model=str(model_name), duration_ms=duration_ms,
-                        )
             return None
         input_tokens, output_tokens = raw.get("input_tokens"), raw.get("output_tokens")
         if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
             return None
+        # Same cache correction for the older/plain `usage` shape.
+        for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            value = raw.get(key)
+            if isinstance(value, int):
+                input_tokens += value
+        searches = 0
+        server_tool_use = raw.get("server_tool_use")
+        if isinstance(server_tool_use, dict) and isinstance(server_tool_use.get("web_search_requests"), int):
+            searches = server_tool_use["web_search_requests"]
         model = data.get("model") or data.get("message", {}).get("model") or self._cfg.model or "claude-code-cli"
         return LLMUsage(
-            input_tokens=input_tokens, output_tokens=output_tokens, model=str(model), duration_ms=duration_ms
+            input_tokens=input_tokens, output_tokens=output_tokens, model=str(model),
+            duration_ms=duration_ms, web_search_requests=searches, price_from_table=priceable,
         )
 
     @staticmethod

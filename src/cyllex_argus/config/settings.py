@@ -91,6 +91,16 @@ class LLMConfig(BaseModel):
     model: str | None = None
     timeout_seconds: int = 600
     claude_binary: str = "claude"
+    # How the trace prices a `claude-code-cli` call. That provider runs on a Claude Pro/Max
+    # subscription, which is flat-rate: no tokens are billed, so any figure is notional.
+    #   "list" (default) - price it from PRICES_USD_PER_MTOK like every other provider, which
+    #                      answers "what would this run have cost on a metered API key?" and keeps
+    #                      the dashboard cost column populated and comparable across providers.
+    #   "none"           - record no cost for subscription calls. Tokens, model and duration are
+    #                      still recorded; only the money column stays empty, because on a
+    #                      subscription it is not money that was spent.
+    # Metered providers (anthropic-api, openai-api) ignore this; Ollama is already zero-cost.
+    subscription_cost_basis: Literal["list", "none"] = "list"
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)  # read only when provider = "ollama"
     anthropic: AnthropicApiConfig = Field(default_factory=AnthropicApiConfig)  # provider = "anthropic-api"
     openai: OpenAIApiConfig = Field(default_factory=OpenAIApiConfig)  # provider = "openai-api"

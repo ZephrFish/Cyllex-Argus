@@ -29,6 +29,10 @@ class LLMUsage(BaseModel):
     # Server-side web searches billed on this call (Anthropic web_search tool). 0 for every
     # provider/call that did not search. Priced separately from tokens ($10 / 1000 searches).
     web_search_requests: int = 0
+    # False when the trace must NOT price this call from the static table. Set by the
+    # subscription provider under `[llm] subscription_cost_basis = "none"`, where per-token
+    # pricing describes no real charge. Tokens and model are still recorded either way.
+    price_from_table: bool = True
 
 
 class LLMResponse[T: BaseModel](BaseModel):

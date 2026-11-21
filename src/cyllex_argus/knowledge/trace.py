@@ -77,7 +77,11 @@ class SQLiteTraceRecorder:
 
     def record(self, event: PipelineEvent) -> None:
         usage = event.usage
-        cost = cost_usd(usage.model, usage.input_tokens, usage.output_tokens, usage.web_search_requests) if usage else None
+        cost = (
+            cost_usd(usage.model, usage.input_tokens, usage.output_tokens, usage.web_search_requests)
+            if usage and usage.price_from_table
+            else None
+        )
         duration = event.duration_ms if event.duration_ms is not None else (usage.duration_ms if usage else None)
         store_raw = self._should_store_raw(event)
         with self._conn:

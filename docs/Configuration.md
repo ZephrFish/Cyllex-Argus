@@ -13,6 +13,7 @@ provider = "claude-code-cli"    # claude-code-cli | anthropic-api | openai-api |
 model = "opus"                  # claude-code-cli only; optional, uses the Claude Code default when absent
 timeout_seconds = 600           # per LLM call
 claude_binary = "claude"        # claude-code-cli only; or an absolute path to the CLI
+subscription_cost_basis = "list"  # claude-code-cli only; "list" or "none", see below
 
 [llm.ollama]                    # read only when provider = "ollama"
 base_url = "http://127.0.0.1:11434"
@@ -67,6 +68,21 @@ url = "https://unit42.paloaltonetworks.com/feed/"
 [enrichment.enrichers."crt.sh"]
 enabled = false
 ```
+
+### Cost on a subscription
+
+`claude-code-cli` runs on a Claude Pro/Max subscription, which is flat-rate: a run bills no
+tokens, so any per-token figure is an estimate of what the same work would have cost on a
+metered key, not money that left your account. Claude Code labels its own figure the same way
+(`costBasis: "list"`). `[llm] subscription_cost_basis` chooses what the trace records:
+
+| Value | Cost column | Use when |
+|---|---|---|
+| `"list"` (default) | priced from the static table, like every other provider | you want runs comparable across providers, or you are deciding whether to move to a metered key |
+| `"none"` | empty | you would rather see nothing than a number you were not charged |
+
+Tokens, model and duration are recorded either way; only the money column changes. Metered
+providers (`anthropic-api`, `openai-api`) ignore this setting, and Ollama is already zero-cost.
 
 ### Local models
 
